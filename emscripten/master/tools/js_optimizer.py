@@ -25,7 +25,7 @@ func_sig = re.compile('function ([_\w$]+)\(')
 func_sig_json = re.compile('\["defun", ?"([_\w$]+)",')
 import_sig = re.compile('(var|const) ([_\w$]+ *=[^;]+);')
 
-NATIVE_OPTIMIZER = os.environ.get('EMCC_NATIVE_OPTIMIZER') or '1' # use native optimizer by default, unless disabled by EMCC_NATIVE_OPTIMIZER=0 in the env
+NATIVE_OPTIMIZER = os.environ.get('EMCC_NATIVE_OPTIMIZER') or '2' # use optimized native optimizer by default, unless disabled by EMCC_NATIVE_OPTIMIZER=0 in the env
 
 def split_funcs(js, just_split=False):
   if just_split: return map(lambda line: ('(json)', line), js.split('\n'))
@@ -152,6 +152,7 @@ def get_native_optimizer():
                                          shared.path_from_root('tools', 'optimizer', 'parser.cpp'),
                                          shared.path_from_root('tools', 'optimizer', 'simple_ast.cpp'),
                                          shared.path_from_root('tools', 'optimizer', 'optimizer.cpp'),
+                                         shared.path_from_root('tools', 'optimizer', 'optimizer-shared.cpp'),
                                          shared.path_from_root('tools', 'optimizer', 'optimizer-main.cpp'),
                                          '-O3', '-std=c++11', '-fno-exceptions', '-fno-rtti', '-o', output] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()
             outs.append(out)
@@ -421,9 +422,6 @@ EMSCRIPTEN_FUNCS();
   else:
     filenames = []
 
-  if shared.Settings.WASM:
-    passes = filter(lambda p: p != 'minifyWhitespace', passes) # if we are going to wasmify the asm module, no need to minify it before hand
-
   if len(filenames) > 0:
     if not use_native(passes, source_map) or not get_native_optimizer():
       commands = map(lambda filename: js_engine +
@@ -480,7 +478,9 @@ EMSCRIPTEN_FUNCS();
       if DEBUG: print >> sys.stderr, 'running cleanup on shell code'
       next = cld + '.cl.js'
       temp_files.note(next)
-      subprocess.Popen(js_engine + [JS_OPTIMIZER, cld, 'noPrintMetadata'] + (['minifyWhitespace'] if 'minifyWhitespace' in passes else []), stdout=open(next, 'w')).communicate()
+      proc = subprocess.Popen(js_engine + [JS_OPTIMIZER, cld, 'noPrintMetadata', 'JSDCE'] + (['minifyWhitespace'] if 'minifyWhitespace' in passes else []), stdout=open(next, 'w'))
+      proc.communicate()
+      assert proc.returncode == 0
       cld = next
     coutput = open(cld).read()
     coutput = coutput.replace('wakaUnknownBefore();', start_asm)

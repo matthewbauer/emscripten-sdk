@@ -30,6 +30,8 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
     return 'SPLIT_MEMORY=' in str(self.emcc_args)
   def is_wasm(self):
     return 'WASM=1' in self.emcc_args
+  def is_binaryen(self):
+    return 'BINARYEN' in str(self.emcc_args)
 
   def test_hello_world(self):
       test_path = path_from_root('tests', 'core', 'test_hello_world')
@@ -504,25 +506,15 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
     self.do_run(open(path_from_root('tests', 'cube2md5.cpp')).read(), open(path_from_root('tests', 'cube2md5.ok')).read())
 
   def test_cube2hash(self):
-    # extra testing for various codegen modes
-    try:
-      old_chunk_size = os.environ.get('EMSCRIPT_MAX_CHUNK_SIZE') or ''
+    # A good test of i64 math
+    self.do_run('', 'Usage: hashstring <seed>',
+                libraries=self.get_library('cube2hash', ['cube2hash.bc'], configure=None),
+                includes=[path_from_root('tests', 'cube2hash')])
 
-      for chunk_size in ['1', old_chunk_size]: # test splitting out each function to a chunk in emscripten.py (21 functions here)
-        print '  chunks', chunk_size
-        os.environ['EMSCRIPT_MAX_CHUNK_SIZE'] = chunk_size
-
-        # A good test of i64 math
-        self.do_run('', 'Usage: hashstring <seed>',
-                    libraries=self.get_library('cube2hash', ['cube2hash.bc'], configure=None),
-                    includes=[path_from_root('tests', 'cube2hash')])
-
-        for text, output in [('fleefl', '892BDB6FD3F62E863D63DA55851700FDE3ACF30204798CE9'),
-                             ('fleefl2', 'AA2CC5F96FC9D540CA24FDAF1F71E2942753DB83E8A81B61'),
-                             ('64bitisslow', '64D8470573635EC354FEE7B7F87C566FCAF1EFB491041670')]:
-          self.do_run('', 'hash value: ' + output, [text], no_build=True)
-    finally:
-      os.environ['EMSCRIPT_MAX_CHUNK_SIZE'] = old_chunk_size
+    for text, output in [('fleefl', '892BDB6FD3F62E863D63DA55851700FDE3ACF30204798CE9'),
+                         ('fleefl2', 'AA2CC5F96FC9D540CA24FDAF1F71E2942753DB83E8A81B61'),
+                         ('64bitisslow', '64D8470573635EC354FEE7B7F87C566FCAF1EFB491041670')]:
+      self.do_run('', 'hash value: ' + output, [text], no_build=True)
 
   def test_unaligned(self):
       return self.skip('LLVM marks the reads of s as fully aligned, making this test invalid')
@@ -659,10 +651,10 @@ __m128 m;
 
 int main()
 {
-    printf("Alignment: %d addr: %x\n", ((int)&v) % 16, (int)&v);
-    printf("Alignment: %d addr: %x\n", ((int)&m) % 16, (int)&m);
+    printf("Alignment: %d addr: 0x%x\n", ((int)&v) % 16, (int)&v);
+    printf("Alignment: %d addr: 0x%x\n", ((int)&m) % 16, (int)&m);
 }
-    ''', 'Alignment: 0 addr: 10\nAlignment: 0 addr: 50\n') # hardcoded addresses, just to track if this ever changes by surprise. will need normal updates.
+    ''', 'Alignment: 0 addr: 0xa20\nAlignment: 0 addr: 0xa60\n') # hardcoded addresses, just to track if this ever changes by surprise. will need normal updates.
 
     test()
     print 'relocatable'
@@ -825,9 +817,10 @@ int main()
 
       self.do_run_from_file(src, output)
 
-      print 'main module'
-      Settings.MAIN_MODULE = 1
-      self.do_run_from_file(src, output)
+      if Settings.ALLOW_MEMORY_GROWTH == 0:
+        print 'main module'
+        Settings.MAIN_MODULE = 1
+        self.do_run_from_file(src, output)
 
   def test_frexp(self):
       test_path = path_from_root('tests', 'core', 'test_frexp')
@@ -836,12 +829,14 @@ int main()
       self.do_run_from_file(src, output)
 
   def test_rounding(self):
-      Settings.PRECISE_F32 = 1 # in the move to llvm 3.7, froundf in musl became more sensitive to float/double differences
+      for precise_f32 in [0, 1]:
+        print precise_f32
+        Settings.PRECISE_F32 = precise_f32
 
-      test_path = path_from_root('tests', 'core', 'test_rounding')
-      src, output = (test_path + s for s in ('.in', '.out'))
+        test_path = path_from_root('tests', 'core', 'test_rounding')
+        src, output = (test_path + s for s in ('.in', '.out'))
 
-      self.do_run_from_file(src, output)
+        self.do_run_from_file(src, output)
 
   def test_fcvt(self):
       test_path = path_from_root('tests', 'core', 'test_fcvt')
@@ -1549,6 +1544,18 @@ int main(int argc, char **argv)
     src, output = (test_path + s for s in ('.cpp', '.txt'))
     self.do_run_from_file(src, output)
 
+  def test_exceptions_simplify_cfg(self):
+    Settings.DISABLE_EXCEPTION_CATCHING = 0
+    test_path = path_from_root('tests', 'core', 'test_exceptions_simplify_cfg')
+    src, output = (test_path + s for s in ('.cpp', '.txt'))
+    self.do_run_from_file(src, output)
+
+  def test_exceptions_libcxx(self):
+    Settings.DISABLE_EXCEPTION_CATCHING = 0
+    test_path = path_from_root('tests', 'core', 'test_exceptions_libcxx')
+    src, output = (test_path + s for s in ('.cpp', '.txt'))
+    self.do_run_from_file(src, output)
+
   def test_bad_typeid(self):
     Settings.ERROR_ON_UNDEFINED_SYMBOLS = 1
     Settings.DISABLE_EXCEPTION_CATCHING = 0
@@ -1639,6 +1646,12 @@ int main(int argc, char**argv)
    printf("value = real %.2f imag %.2f\n",creal(z4),cimag(z4));
    float complex z5 =  cargf(z1); 
    printf("value = real %.2f imag %.2f\n",creal(z5),cimag(z5));
+   float complex z6 = 0.5 + 0.5 * I;
+   float complex z7 = 0.5 - 0.5 * I;
+   float complex z8 = z6 * z7;
+   float complex z9 = z6 / z7;
+   printf("value = real %.2f imag %.2f\n",creal(z8),cimag(z8));
+   printf("value = real %.2f imag %.2f\n",creal(z9),cimag(z9));
    return 0;
 }
 ''', '''value = real 1.00 imag 3.00
@@ -1646,7 +1659,9 @@ abs = 3.16
 value = real 1.00 imag -3.00
 value = real -2.69 imag 0.38
 value = real 1.00 imag -3.00
-value = real 1.25 imag 0.00''', force_c=True)
+value = real 1.25 imag 0.00
+value = real 0.50 imag 0.00
+value = real 0.00 imag 1.00''', force_c=True)
 
   def test_segfault(self):
     Settings.SAFE_HEAP = 1
@@ -2226,6 +2241,11 @@ int main() {
       fail = fail[fail.find(code_start):]
       win = win[win.find(code_start):]
       assert len(fail) < len(win), 'failing code - without memory growth on - is more optimized, and smaller' + str([len(fail), len(win)])
+
+    # Tracing of memory growths should work
+    Settings.EMSCRIPTEN_TRACING = 1
+    self.emcc_args += ['--tracing']
+    self.do_run(src, '*pre: hello,4.955*\n*hello,4.955*\n*hello,4.955*')
 
   def test_memorygrowth_2(self):
     self.emcc_args += ['-s', 'ALLOW_MEMORY_GROWTH=0'] # start with 0
@@ -2998,6 +3018,8 @@ The current type of b is: 9
     self.do_run(main, 'supp: 54,2\nmain: 56\nsupp see: 543\nmain see: 76\nok.')
 
   def can_dlfcn(self):
+    if Settings.ALLOW_MEMORY_GROWTH == 1: return self.skip('no dlfcn with memory growth yet')
+    if self.is_binaryen(): return self.skip('no shared modules in wasm')
     return True
 
   def prep_dlfcn_lib(self):
@@ -3757,6 +3779,8 @@ ok
 ''', post_build=self.dlfcn_post_build)
 
   def dylink_test(self, main, side, expected, header=None, main_emcc_args=[], force_c=False, need_reverse=True, auto_load=True):
+    if not self.can_dlfcn(): return
+
     if header:
       open('header.h', 'w').write(header)
 
@@ -3998,6 +4022,7 @@ var Module = {
     ''', 'a new Class\n')
 
   def test_dylink_global_inits(self):
+    if not self.can_dlfcn(): return
     def test():
       self.dylink_test(header=r'''
         #include <stdio.h>
@@ -4029,7 +4054,7 @@ var Module = {
       #include <stdint.h>
       extern int64_t sidey();
       int main() {
-        printf("other says %lld.", sidey());
+        printf("other says %llx.\\n", sidey());
         return 0;
       }
     ''', '''
@@ -4039,9 +4064,19 @@ var Module = {
         x = x * x * x * x;
         x += x % 17;
         x += (x * (1 << 30));
+        x -= 96;
+        x = (x + 1000) / ((x % 5) + 1);
+        volatile uint64_t y = x / 2;
+        x = y / 3;
+        y = y * y * y * y;
+        y += y % 17;
+        y += (y * (1 << 30));
+        y -= 121;
+        y = (y + 1000) / ((y % 5) + 1);
+        x += y;
         return x;
       }
-    ''', 'other says 15724949027125.')
+    ''', 'other says 175a1ddee82b8c31.')
 
   def test_dylink_i64_b(self):
     self.dylink_test('''
@@ -4221,6 +4256,8 @@ var Module = {
     ''', expected=['simple.\nsimple.\nsimple.\nsimple.\n'])
 
   def test_dylink_syslibs(self): # one module uses libcxx, need to force its inclusion when it isn't the main
+    if not self.can_dlfcn(): return
+
     def test(syslibs, expect_pass=True, need_reverse=True):
       print 'syslibs', syslibs, Settings.ASSERTIONS
       passed = True
@@ -4329,6 +4366,8 @@ var Module = {
     ''', expected=['starting main\nBase\nDerived\nOK'])
 
   def test_dylink_hyper_dupe(self):
+    if not self.can_dlfcn(): return
+
     Settings.TOTAL_MEMORY = 64*1024*1024
 
     if Settings.ASSERTIONS: self.emcc_args += ['-s', 'ASSERTIONS=2']
@@ -4812,6 +4851,11 @@ Pass: 0.000012 0.000012''')
     if '-O2' in self.emcc_args:
       self.emcc_args += ['--closure', '1'] # Use closure here, to test we don't break FS stuff
       self.emcc_args = filter(lambda x: x != '-g', self.emcc_args) # ensure we test --closure 1 --memory-init-file 1 (-g would disable closure)
+    elif '-O3' in self.emcc_args:
+      print 'closure 2'
+      self.emcc_args += ['--closure', '2'] # Use closure 2 here for some additional coverage
+
+    print 'base', self.emcc_args
 
     post = '''
 def process(filename):
@@ -4844,7 +4888,7 @@ def process(filename):
       print mode
       self.emcc_args = orig_args + mode
       try_delete(mem_file)
-      self.do_run(src, map(lambda x: x if 'SYSCALL_DEBUG=1' not in mode else ('syscall! 146,SYS_writev' if self.run_name == 'default' else 'syscall! 146'), ('size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\n5 bytes to dev/null: 5\nok.\n \ntexte\n', 'size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\ntexte\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\n5 bytes to dev/null: 5\nok.\n')),
+      self.do_run(src, map(lambda x: x if 'SYSCALL_DEBUG=1' not in mode else ('syscall! 146,SYS_writev' if self.run_name == 'default' else 'syscall! 146'), ('size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\n5 bytes to dev/null: 5\nok.\ntexte\n', 'size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\ntexte\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\n5 bytes to dev/null: 5\nok.\n')),
                   post_build=post, extra_emscripten_args=['-H', 'libc/fcntl.h'])
       if self.uses_memory_init_file():
         assert os.path.exists(mem_file)
@@ -4881,6 +4925,7 @@ def process(filename):
     self.do_run(src, ('got: 35\ngot: 45\ngot: 25\ngot: 15\n \nisatty? 0,0,1\n', 'got: 35\ngot: 45\ngot: 25\ngot: 15\nisatty? 0,0,1\n', 'isatty? 0,0,1\ngot: 35\ngot: 45\ngot: 25\ngot: 15\n'), post_build=post, output_nicerizer=clean)
 
   def test_mount(self):
+    Settings.FORCE_FILESYSTEM = 1
     src = open(path_from_root('tests', 'fs', 'test_mount.c'), 'r').read()
     self.do_run(src, 'success', force_c=True)
 
@@ -5119,6 +5164,7 @@ def process(filename):
     self.do_run_from_file(src, output)
 
   def test_utf32(self):
+    Settings.EXTRA_EXPORTED_RUNTIME_METHODS = ['UTF32ToString', 'stringToUTF32', 'lengthBytesUTF32']
     self.do_run(open(path_from_root('tests', 'utf32.cpp')).read(), 'OK.')
     self.do_run(open(path_from_root('tests', 'utf32.cpp')).read(), 'OK.', args=['-fshort-wchar'])
 
@@ -5178,6 +5224,10 @@ def process(filename):
     self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
     print 'closure'
     self.emcc_args += ['--closure', '1']
+    self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
+
+  def test_fs_nodefs_cloexec(self):
+    src = open(path_from_root('tests', 'fs', 'test_nodefs_cloexec.c'), 'r').read()
     self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
 
   def test_fs_trackingdelegate(self):
@@ -5415,9 +5465,10 @@ PORT: 3979
     Building.COMPILER_TEST_OPTS += ['-std=c++11']
     self.do_run_from_file(src, output)
 
-    print 'main module'
-    Settings.MAIN_MODULE = 1
-    self.do_run_from_file(src, output)
+    if Settings.ALLOW_MEMORY_GROWTH == 0:
+      print 'main module'
+      Settings.MAIN_MODULE = 1
+      self.do_run_from_file(src, output)
 
   def test_phiundef(self):
     test_path = path_from_root('tests', 'core', 'test_phiundef')
@@ -5640,6 +5691,8 @@ return malloc(size);
     if 'SAFE_HEAP' in str(self.emcc_args): return self.skip('we do unsafe stuff here')
     # present part of the symbols of dlmalloc, not all. malloc is harder to link than new which is weak.
 
+    Settings.NO_EXIT_RUNTIME = 1 # if we exit, then we flush streams, but the bad malloc we install here messes that up
+
     test_path = path_from_root('tests', 'core', 'test_dlmalloc_partial_2')
     src, output = (test_path + s for s in ('.in', '.out'))
 
@@ -5770,6 +5823,7 @@ return malloc(size);
   # Tests the full SSE2 API.
   @SIMD
   def test_sse2_full(self):
+    if self.run_name == 'asm1': return self.skip("some i64 thing we can't legalize yet. possible hint: optimize with -O0 or -O2+, and not -O1");
     import platform
     is_64bits = platform.architecture()[0] == '64bit'
     if not is_64bits: return self.skip('This test requires 64-bit system, since it tests SSE2 intrinsics only available in 64-bit mode!')
@@ -5785,6 +5839,49 @@ return malloc(size);
     for mode in [[], ['-s', 'SIMD=1']]:
       self.emcc_args = orig_args + mode + ['-I' + path_from_root('tests'), '-msse2'] + args
       self.do_run(open(path_from_root('tests', 'test_sse2_full.cpp'), 'r').read(), native_result)
+
+  # Tests the full SSE3 API.
+  @SIMD
+  def test_sse3_full(self):
+    args = []
+    if '-O0' in self.emcc_args: args += ['-D_DEBUG=1']
+    Popen([CLANG, path_from_root('tests', 'test_sse3_full.cpp'), '-o', 'test_sse3_full', '-D_CRT_SECURE_NO_WARNINGS=1', '-msse3'] + args + get_clang_native_args(), env=get_clang_native_env(), stdout=PIPE).communicate()
+    native_result, err = Popen('./test_sse3_full', stdout=PIPE).communicate()
+    native_result = native_result.replace('\r\n', '\n') # Windows line endings fix
+
+    Settings.PRECISE_F32 = 1 # SIMD currently requires Math.fround
+    orig_args = self.emcc_args
+    for mode in [[], ['-s', 'SIMD=1']]:
+      self.emcc_args = orig_args + mode + ['-I' + path_from_root('tests'), '-msse3'] + args
+      self.do_run(open(path_from_root('tests', 'test_sse3_full.cpp'), 'r').read(), native_result)
+
+  @SIMD
+  def test_ssse3_full(self):
+    args = []
+    if '-O0' in self.emcc_args: args += ['-D_DEBUG=1']
+    Popen([CLANG, path_from_root('tests', 'test_ssse3_full.cpp'), '-o', 'test_ssse3_full', '-D_CRT_SECURE_NO_WARNINGS=1', '-mssse3'] + args + get_clang_native_args(), env=get_clang_native_env(), stdout=PIPE).communicate()
+    native_result, err = Popen('./test_ssse3_full', stdout=PIPE).communicate()
+    native_result = native_result.replace('\r\n', '\n') # Windows line endings fix
+
+    Settings.PRECISE_F32 = 1 # SIMD currently requires Math.fround
+    orig_args = self.emcc_args
+    for mode in [[], ['-s', 'SIMD=1']]:
+      self.emcc_args = orig_args + mode + ['-I' + path_from_root('tests'), '-mssse3'] + args
+      self.do_run(open(path_from_root('tests', 'test_ssse3_full.cpp'), 'r').read(), native_result)
+
+  @SIMD
+  def test_sse4_1_full(self):
+    args = []
+    if '-O0' in self.emcc_args: args += ['-D_DEBUG=1']
+    Popen([CLANG, path_from_root('tests', 'test_sse4_1_full.cpp'), '-o', 'test_sse4_1_full', '-D_CRT_SECURE_NO_WARNINGS=1', '-msse4.1'] + args + get_clang_native_args(), env=get_clang_native_env(), stdout=PIPE).communicate()
+    native_result, err = Popen('./test_sse4_1_full', stdout=PIPE).communicate()
+    native_result = native_result.replace('\r\n', '\n') # Windows line endings fix
+
+    Settings.PRECISE_F32 = 1 # SIMD currently requires Math.fround
+    orig_args = self.emcc_args
+    for mode in [[], ['-s', 'SIMD=1']]:
+      self.emcc_args = orig_args + mode + ['-I' + path_from_root('tests'), '-msse4.1'] + args
+      self.do_run(open(path_from_root('tests', 'test_sse4_1_full.cpp'), 'r').read(), native_result)
 
   @SIMD
   def test_simd(self):
@@ -5903,6 +6000,31 @@ return malloc(size);
   def test_simd16(self):
     src, output = (path_from_root('tests', 'core', 'test_simd16') + s for s in ('.c', '.out'))
     self.emcc_args = self.emcc_args + ['-msse', '-msse2']
+    self.do_run_from_file(src, output)
+
+  @SIMD
+  def test_simd_float64x2(self):
+    src, output = (path_from_root('tests', 'core', 'test_simd_float64x2') + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
+
+  @SIMD
+  def test_simd_float32x4(self):
+    src, output = (path_from_root('tests', 'core', 'test_simd_float32x4') + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
+
+  @SIMD
+  def test_simd_int32x4(self):
+    src, output = (path_from_root('tests', 'core', 'test_simd_int32x4') + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
+
+  @SIMD
+  def test_simd_int16x8(self):
+    src, output = (path_from_root('tests', 'core', 'test_simd_int16x8') + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
+
+  @SIMD
+  def test_simd_int8x16(self):
+    src, output = (path_from_root('tests', 'core', 'test_simd_int8x16') + s for s in ('.c', '.out'))
     self.do_run_from_file(src, output)
 
   @SIMD
@@ -6085,21 +6207,23 @@ def process(filename):
 
   def test_poppler(self):
     if WINDOWS: return self.skip('test_poppler depends on freetype, which uses a ./configure script to build and therefore currently only runs on Linux and OS X.')
-    Settings.NO_EXIT_RUNTIME = 1
 
-    Building.COMPILER_TEST_OPTS += [
-      '-I' + path_from_root('tests', 'freetype', 'include'),
-      '-I' + path_from_root('tests', 'poppler', 'include')
-    ]
+    def test():
+      Settings.NO_EXIT_RUNTIME = 1
 
-    Settings.INVOKE_RUN = 0 # We append code that does run() ourselves
+      Building.COMPILER_TEST_OPTS += [
+        '-I' + path_from_root('tests', 'freetype', 'include'),
+        '-I' + path_from_root('tests', 'poppler', 'include')
+      ]
 
-    # See post(), below
-    input_file = open(os.path.join(self.get_dir(), 'paper.pdf.js'), 'w')
-    input_file.write(str(map(ord, open(path_from_root('tests', 'poppler', 'paper.pdf'), 'rb').read())))
-    input_file.close()
+      Settings.INVOKE_RUN = 0 # We append code that does run() ourselves
 
-    post = '''
+      # See post(), below
+      input_file = open(os.path.join(self.get_dir(), 'paper.pdf.js'), 'w')
+      input_file.write(str(map(ord, open(path_from_root('tests', 'poppler', 'paper.pdf'), 'rb').read())))
+      input_file.close()
+
+      post = '''
 def process(filename):
   # To avoid loading this large file to memory and altering it, we simply append to the end
   src = open(filename, 'a')
@@ -6112,28 +6236,44 @@ def process(filename):
   )
   src.close()
 '''
+ 
+ #fontconfig = self.get_library('fontconfig', [os.path.join('src', '.libs', 'libfontconfig.a')]) # Used in file, but not needed, mostly
 
-    #fontconfig = self.get_library('fontconfig', [os.path.join('src', '.libs', 'libfontconfig.a')]) # Used in file, but not needed, mostly
+      freetype = self.get_freetype()
 
-    freetype = self.get_freetype()
+      poppler = self.get_library('poppler',
+                                 [os.path.join('utils', 'pdftoppm.o'),
+                                  os.path.join('utils', 'parseargs.o'),
+                                  os.path.join('poppler', '.libs', 'libpoppler.a')],
+                                 env_init={ 'FONTCONFIG_CFLAGS': ' ', 'FONTCONFIG_LIBS': ' ' },
+                                 configure_args=['--disable-libjpeg', '--disable-libpng', '--disable-poppler-qt', '--disable-poppler-qt4', '--disable-cms', '--disable-cairo-output', '--disable-abiword-output', '--enable-shared=no'])
 
-    poppler = self.get_library('poppler',
-                               [os.path.join('utils', 'pdftoppm.o'),
-                                os.path.join('utils', 'parseargs.o'),
-                                os.path.join('poppler', '.libs', 'libpoppler.a')],
-                               env_init={ 'FONTCONFIG_CFLAGS': ' ', 'FONTCONFIG_LIBS': ' ' },
-                               configure_args=['--disable-libjpeg', '--disable-libpng', '--disable-poppler-qt', '--disable-poppler-qt4', '--disable-cms', '--disable-cairo-output', '--disable-abiword-output', '--enable-shared=no'])
+      # Combine libraries
 
-    # Combine libraries
+      combined = os.path.join(self.get_dir(), 'poppler-combined.bc')
+      Building.link(poppler + freetype, combined)
 
-    combined = os.path.join(self.get_dir(), 'poppler-combined.bc')
-    Building.link(poppler + freetype, combined)
+      self.do_ll_run(combined,
+                     map(ord, open(path_from_root('tests', 'poppler', 'ref.ppm'), 'r').read()).__str__().replace(' ', ''),
+                     args='-scale-to 512 paper.pdf filename'.split(' '),
+                     post_build=post)
+                     #, build_ll_hook=self.do_autodebug)
 
-    self.do_ll_run(combined,
-                   map(ord, open(path_from_root('tests', 'poppler', 'ref.ppm'), 'r').read()).__str__().replace(' ', ''),
-                   args='-scale-to 512 paper.pdf filename'.split(' '),
-                   post_build=post)
-                   #, build_ll_hook=self.do_autodebug)
+    test()
+    num_original_funcs = self.count_funcs('src.cpp.o.js')
+
+    # Run with duplicate function elimination turned on
+    dfe_supported_opt_levels = ['-O2', '-O3', '-Oz', '-Os']
+
+    for opt_level in dfe_supported_opt_levels:
+      if opt_level in self.emcc_args:
+        print >> sys.stderr, "Testing poppler with ELIMINATE_DUPLICATE_FUNCTIONS set to 1"
+        Settings.ELIMINATE_DUPLICATE_FUNCTIONS = 1
+        test()
+
+        # Make sure that DFE ends up eliminating more than 200 functions
+        assert (num_original_funcs - self.count_funcs('src.cpp.o.js')) > 200
+        break
 
   def test_openjpeg(self):
     Building.COMPILER_TEST_OPTS = filter(lambda x: x != '-g', Building.COMPILER_TEST_OPTS) # remove -g, so we have one test without it by default
@@ -6297,7 +6437,7 @@ def process(filename):
     emcc_args = self.emcc_args
 
     # The following tests link to libc, and must be run with EMCC_LEAVE_INPUTS_RAW = 0
-    need_no_leave_inputs_raw = ['muli33_ta2', 'philoop_ta2', 'uadd_overflow_64_ta2', 'i64toi8star', 'legalizer_ta2', 'quotedlabel', 'alignedunaligned', 'sillybitcast', 'invokeundef', 'loadbitcastgep', 'sillybitcast2', 'legalizer_b_ta2', 'emptystruct', 'entry3']
+    need_no_leave_inputs_raw = ['muli33_ta2', 'philoop_ta2', 'uadd_overflow_64_ta2', 'i64toi8star', 'legalizer_ta2', 'quotedlabel', 'alignedunaligned', 'sillybitcast', 'invokeundef', 'loadbitcastgep', 'sillybitcast2', 'legalizer_b_ta2', 'emptystruct', 'entry3', 'atomicrmw_i64', 'atomicrmw_b_i64']
 
     try:
       import random
@@ -6316,6 +6456,10 @@ def process(filename):
         ]: continue
         if self.is_emterpreter() and os.path.basename(shortname) in [
           'funcptr', # test writes to memory we store out bytecode! test is invalid
+          'i1282vecnback', # uses simd
+        ]:
+          continue
+        if self.is_binaryen() and os.path.basename(shortname) in [
           'i1282vecnback', # uses simd
         ]:
           continue
@@ -6441,23 +6585,20 @@ def process(filename):
   def test_ccall(self):
     post = '''
 def process(filename):
-  src = \'\'\'
-    var Module = { 'noInitialRun': true };
-    \'\'\' + open(filename, 'r').read() + \'\'\'
-    addOnExit(function () {
+  src = open(filename, 'r').read() + \'\'\'
       Module.print('*');
       var ret;
-      ret = Module['ccall']('get_int', 'number'); Module.print([typeof ret, ret]);
-      ret = ccall('get_float', 'number'); Module.print([typeof ret, ret.toFixed(2)]);
-      ret = ccall('get_string', 'string'); Module.print([typeof ret, ret]);
+      ret = Module['ccall']('get_int', 'number'); Module.print([typeof ret, ret].join(','));
+      ret = ccall('get_float', 'number'); Module.print([typeof ret, ret.toFixed(2)].join(','));
+      ret = ccall('get_string', 'string'); Module.print([typeof ret, ret].join(','));
       ret = ccall('print_int', null, ['number'], [12]); Module.print(typeof ret);
       ret = ccall('print_float', null, ['number'], [14.56]); Module.print(typeof ret);
       ret = ccall('print_string', null, ['string'], ["cheez"]); Module.print(typeof ret);
       ret = ccall('print_string', null, ['array'], [[97, 114, 114, 45, 97, 121, 0]]); Module.print(typeof ret);
-      ret = ccall('multi', 'number', ['number', 'number', 'number', 'string'], [2, 1.4, 3, 'more']); Module.print([typeof ret, ret]);
+      ret = ccall('multi', 'number', ['number', 'number', 'number', 'string'], [2, 1.4, 3, 'more']); Module.print([typeof ret, ret].join(','));
       var p = ccall('malloc', 'pointer', ['number'], [4]);
       setValue(p, 650, 'i32');
-      ret = ccall('pointer', 'pointer', ['pointer'], [p]); Module.print([typeof ret, getValue(ret, 'i32')]);
+      ret = ccall('pointer', 'pointer', ['pointer'], [p]); Module.print([typeof ret, getValue(ret, 'i32')].join(','));
       Module.print('*');
       // part 2: cwrap
       var noThirdParam = Module['cwrap']('get_int', 'number');
@@ -6472,8 +6613,6 @@ def process(filename):
       }
       Module.print('stack is ok.');
       ccall('call_ccall_again', null);
-    });
-    Module.callMain();
   \'\'\'
   open(filename, 'w').write(src)
 '''
@@ -6797,7 +6936,9 @@ def process(filename):
     self.do_run(src, '|1.266,1|\n')
 
   def test_demangle_stacks(self):
-    if Settings.ASM_JS: return self.skip('spidermonkey has stack trace issues')
+    Settings.DEMANGLE_SUPPORT = 1
+    if '-O' in str(self.emcc_args):
+      self.emcc_args += ['--profiling-funcs', '--llvm-opts', '0']
 
     test_path = path_from_root('tests', 'core', 'test_demangle_stacks')
     src, output = (test_path + s for s in ('.in', '.out'))
@@ -7197,7 +7338,7 @@ def process(filename):
 // test purposes: remove printErr output, whose order is unpredictable when compared to print
 Module.printErr = Module['printErr'] = function(){};
 ''')
-      self.emcc_args += ['--post-js', 'glue.js', '--post-js', 'export.js']
+      self.emcc_args += ['-s', 'EXPORTED_FUNCTIONS=["_malloc"]', '--post-js', 'glue.js', '--post-js', 'export.js']
       shutil.copyfile(path_from_root('tests', 'webidl', 'test.h'), self.in_dir('test.h'))
       shutil.copyfile(path_from_root('tests', 'webidl', 'test.cpp'), self.in_dir('test.cpp'))
       src = open('test.cpp').read()
@@ -7410,6 +7551,7 @@ Module.printErr = Module['printErr'] = function(){};
 
   def test_emscripten_log(self):
     if self.is_wasm(): return self.skip('wasmifying destroys debug info and stack tracability')
+    self.emcc_args += ['-s', 'DEMANGLE_SUPPORT=1']
     if self.is_emterpreter():
       self.emcc_args += ['--profiling-funcs'] # without this, stack traces are not useful (we jump emterpret=>emterpret)
       Building.COMPILER_TEST_OPTS += ['-DEMTERPRETER'] # even so, we get extra emterpret() calls on the stack
@@ -7453,7 +7595,12 @@ Success!
       int main() {
         atexit(cleanup); // this atexit should still be called
         printf("hello, world!\n");
-        exit(118); // Unusual exit status to make sure it's working!
+        // Unusual exit status to make sure it's working!
+        if (CAPITAL_EXIT) {
+          _Exit(118);
+        } else {
+          exit(118);
+        }
       }
     '''
     open('post.js', 'w').write('''
@@ -7463,7 +7610,8 @@ Success!
       Module.callMain();
     ''')
     self.emcc_args += ['-s', 'INVOKE_RUN=0', '--post-js', 'post.js']
-    self.do_run(src, 'hello, world!\ncleanup\nI see exit status: 118')
+    self.do_run(src.replace('CAPITAL_EXIT', '0'), 'hello, world!\ncleanup\nI see exit status: 118')
+    self.do_run(src.replace('CAPITAL_EXIT', '1'), 'hello, world!\ncleanup\nI see exit status: 118')
 
   def test_noexitruntime(self):
     src = r'''
@@ -7734,6 +7882,7 @@ int main(int argc, char **argv) {
     self.do_run(open(os.path.join(self.get_dir(), 'main.cpp'), 'r').read(), 'able to run memprof')
 
   def test_fs_dict(self):
+      Settings.FORCE_FILESYSTEM = 1
       open(self.in_dir('pre.js'), 'w').write('''
         var Module = {};
         Module['preRun'] = function() {
@@ -7813,7 +7962,8 @@ asm2f = make_run("asm2f", compiler=CLANG, emcc_args=["-Oz", "-s", "PRECISE_F32=1
 asm2g = make_run("asm2g", compiler=CLANG, emcc_args=["-O2", "-g", "-s", "ASSERTIONS=1", "-s", "SAFE_HEAP=1"])
 asm2i = make_run("asm2i", compiler=CLANG, emcc_args=["-O2", '-s', 'EMTERPRETIFY=1'])
 #asm2m = make_run("asm2m", compiler=CLANG, emcc_args=["-O2", "--memory-init-file", "0", "-s", "MEM_INIT_METHOD=2", "-s", "ASSERTIONS=1"])
-#asm2w = make_run("asm2w", compiler=CLANG, emcc_args=["-O2", "-s", "WASM=1"])
+#binaryen = make_run("binaryen", compiler=CLANG, emcc_args=["-s", "BINARYEN='..path..'"])
+#normalyen = make_run("normalyen", compiler=CLANG, emcc_args=['-s', 'GLOBAL_BASE=1024']) # useful comparison to binaryen
 
 # Legacy test modes - 
 asm2nn = make_run("asm2nn", compiler=CLANG, emcc_args=["-O2"], env={"EMCC_NATIVE_OPTIMIZER": "0"})
